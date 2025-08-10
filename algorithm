@@ -1,0 +1,76 @@
+# correct-algorithm
+
+# 엑셀파일도 같이 참조하니 엑셀파일의 경로를 코드에서 수정해서 사용해주시길 바랍니다.
+
+import pandas as pd
+import numpy as np
+import itertools
+import cupy as cp
+
+class workdata:
+    def __init__(self,yourlist):
+        self.data = pd.read_excel(yourlist)
+
+        self.type= self.data.iloc[:, 0].to_numpy() # 속성 행렬
+        self.worktime=self.data.iloc[:, 1].to_numpy() # 공정시간 행렬
+        self.deadline=self.data.iloc[:, 2].to_numpy() # 마감기한 행렬
+        self.all= self.data.iloc[:, :].to_numpy()   # 전체 행렬
+
+worklist=workdata('작업리스트 (3).xlsx')
+
+
+
+# 데이터 전처리 cpu만 사용 하는 곳
+nodes= list(range(len(worklist.all)))   # 순서 행렬 만들어주기
+perms = list(itertools.permutations(nodes)) # 순서 행렬 순열 생성
+
+perm_types_matrix = np.array([worklist.type[list(p)] for p in perms]) # 속성에 대한 순열
+perm_worktime_matrix = np.array([worklist.worktime[list(p)] for p in perms]) #  worklist에 대한 순열
+perm_deadline_matrix = np.array([worklist.deadline[list(p)] for p in perms]) # deadline에 대한 순열
+
+# 연산 시작해보자~~~~ gpu 사용하는곳
+
+# 전부 cupy로 전환
+types_m = cp.asarray(perm_types_matrix)
+worktime_m = cp.asarray(perm_worktime_matrix)
+deadline_m = cp.asarray(perm_deadline_matrix)
+
+# 연산시작!
+types_m=(types_m[:,:-1] != types_m[:,1:]).astype(int)
+zeros=cp.zeros((len(types_m),1))
+types_m=cp.concatenate((zeros,types_m),axis=1)
+types_m=types_m*120
+
+totallwork_m = types_m+worktime_m
+totallwork_m=cp.cumsum(totallwork_m,axis=1)
+
+totall_delay= deadline_m-totallwork_m
+totall_delay = cp.minimum(totall_delay, 0)
+
+# 이제 최저 딜레이 탐색 알고리듬 ㄱ
+
+zero_counts = cp.sum(totall_delay == 0, axis=1)                      # shape: (num_perms,)
+
+# (2) 최대 0 개수와, 그 최대값을 달성한 행들 마스크
+max_zero = cp.max(zero_counts)                                       # 0-스칼라(cupy)
+mask = (zero_counts == max_zero)                                     # shape: (num_perms,)
+
+# (3) 최대 0 개수를 달성한 후보들의 지연 합(덜 음수일수록 좋다고 가정)
+#     - 이미 '0 개수'는 동일하므로, 전체 지연 합이 가장 큰(0에 가까운) 순열을 최적이라 선택
+zeros_subset = totall_delay[mask]                                    # shape: (num_best, n_jobs)
+zeros_sum = cp.sum(zeros_subset, axis=1)                             # 각 후보의 지연 총합 (<= 0)
+best_idx_in_subset = int(cp.argmax(zeros_sum).get())                 # subset 내부 인덱스
+
+# (4) subset 인덱스를 전체(perms) 인덱스로 복원
+best_global_indices = cp.where(mask)[0]                              # shape: (num_best,)
+best_global_idx = int(best_global_indices[best_idx_in_subset].get()) # 원래 perms 인덱스
+
+# (5) 파이썬 영역으로 가져와서 경로/숫자 출력
+max_zero_py = int(max_zero.get())
+num_max_rows_py = int(best_global_indices.size)
+best_perm = perms[best_global_idx]                                   # 최적 경로(작업 ID 순열)
+
+print("=== 결과 ===")
+print(f"[최대 0 개수] {max_zero_py}")
+print(f"[최대 0 개수 달성한 순열의 개수] {num_max_rows_py}")
+print(f"[최적 경로(perms 인덱스={best_global_idx})] {best_perm}")
